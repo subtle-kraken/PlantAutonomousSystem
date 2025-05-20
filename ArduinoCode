@@ -1,0 +1,163 @@
+#include <WiFi.h>
+#include <WebServer.h>
+
+// WiFi credentials
+const char* ssid = "XXXXXXXXXXXX";
+const char* password = "XXXXXXXXXXX";
+
+// Pins
+const int moistureSensorPin = 34;
+const int relayPin = 5;
+const int waterLevelPin = 26;
+const int buzzerPin = 27;
+
+// Adjustable moisture threshold
+int moistureThreshold = 25;
+
+WebServer server(80);
+bool buzzerTest = false;
+unsigned long buzzerStartTime = 0;
+bool buzzerAutoActive = false;
+bool buzzerManuallyStopped = false;
+
+unsigned long lastCheckTime = 0;
+const unsigned long checkInterval = 1000UL * 60UL * 10UL; // 10 minutes
+
+void handleRoot() {
+  int rawValue = analogRead(moistureSensorPin);
+  int moisture = map(rawValue, 4095, 0, 0, 100);
+  int waterLevel = digitalRead(waterLevelPin);
+
+  String page = "<!DOCTYPE html><html><head><meta charset='utf-8'><title>Soil Moisture</title></head><body>";
+  page += "<h2>🌱 Plant Soil Moisture:</h2>";
+  page += "<p><strong>" + String(moisture) + "%</strong></p>";
+
+  if (waterLevel == LOW) {
+    page += "<p style='color:red;'>🚨 Low Water Level!</p>";
+  } else {
+    page += "<p>✅ Water Level OK.</p>";
+  }
+
+  page += "<h3>🔧 Current Moisture Threshold: " + String(moistureThreshold) + "%</h3>";
+  page += "<form action='/set-threshold' method='POST'>";
+  page += "<label for='threshold'>New threshold:</label>";
+  page += "<input type='number' name='threshold' min='0' max='100'>";
+  page += "<button type='submit'>Update</button>";
+  page += "</form><hr>";
+
+  page += "<h3>🛠️ Manual Test</h3>";
+  page += "<form action='/buzzer' method='POST'>";
+  page += "<button type='submit'>🔔 Test Buzzer</button>";
+  page += "</form>";
+
+  page += "<h3>🔕 Stop Alarm</h3>";
+  page += "<form action='/stop-alarm' method='POST'>";
+  page += "<button type='submit'>🔇 Stop Buzzer</button>";
+  page += "</form>";
+
+  page += "</body></html>";
+  server.send(200, "text/html", page);
+}
+
+void handleBuzzerTest() {
+  buzzerTest = true;
+  server.sendHeader("Location", "/");
+  server.send(303);
+}
+
+void handleStopAlarm() {
+  buzzerManuallyStopped = true;
+  digitalWrite(buzzerPin, LOW);
+  server.sendHeader("Location", "/");
+  server.send(303);
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(moistureSensorPin, INPUT);
+  pinMode(relayPin, OUTPUT);
+  pinMode(waterLevelPin, INPUT);
+  pinMode(buzzerPin, OUTPUT);
+  digitalWrite(relayPin, LOW);
+  digitalWrite(buzzerPin, LOW);
+
+  WiFi.begin(ssid, password);
+  Serial.print("Connecting to WiFi");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println("\n✅ WiFi connected!");
+  Serial.print("📡 Local IP address: ");
+  Serial.println(WiFi.localIP());
+
+  server.on("/", handleRoot);
+  server.on("/buzzer", HTTP_POST, handleBuzzerTest);
+  server.on("/stop-alarm", HTTP_POST, handleStopAlarm);
+  server.on("/set-threshold", HTTP_POST, []() {
+    if (server.hasArg("threshold")) {
+      moistureThreshold = server.arg("threshold").toInt();
+      Serial.print("🔧 New moisture threshold: ");
+      Serial.println(moistureThreshold);
+    }
+    server.sendHeader("Location", "/");
+    server.send(303);
+  });
+
+  server.begin();
+}
+
+void loop() {
+  server.handleClient();
+
+  int rawValue = analogRead(moistureSensorPin);
+  int moisture = map(rawValue, 4095, 0, 0, 100);
+  int waterLevel = digitalRead(waterLevelPin);
+
+  Serial.print("Moisture: ");
+  Serial.print(moisture);
+  Serial.print(" %, Water level: ");
+  Serial.println(waterLevel == HIGH ? "OK" : "LOW");
+
+  // Buzzer alert with 5-minute limit
+  if (waterLevel == LOW && !buzzerManuallyStopped) {
+    if (!buzzerAutoActive) {
+      buzzerStartTime = millis();
+      buzzerAutoActive = true;
+      Serial.println("🚨 Low water level, buzzer activated!");
+    }
+    if (millis() - buzzerStartTime <= 300000) {
+      digitalWrite(buzzerPin, HIGH);
+    } else {
+      digitalWrite(buzzerPin, LOW);
+    }
+  } else if (waterLevel == HIGH) {
+    digitalWrite(buzzerPin, LOW);
+    buzzerAutoActive = false;
+    buzzerManuallyStopped = false;
+  }
+
+  // Manual buzzer test
+  if (buzzerTest) {
+    Serial.println("🔔 Manual buzzer test!");
+    digitalWrite(buzzerPin, HIGH);
+    delay(2000);
+    digitalWrite(buzzerPin, LOW);
+    buzzerTest = false;
+  }
+
+  // Automatic watering every 10 minutes
+  if (millis() - lastCheckTime >= checkInterval) {
+    lastCheckTime = millis();
+    if (moisture < moistureThreshold && waterLevel == HIGH) {
+      Serial.println("💧 Watering in progress...");
+      digitalWrite(relayPin, HIGH);
+      delay(2000);
+      digitalWrite(relayPin, LOW);
+    } else if (waterLevel == LOW) {
+      Serial.println("🔚 Watering blocked (no water)");
+    }
+  }
+}
